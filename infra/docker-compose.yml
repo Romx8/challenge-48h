@@ -1,0 +1,233 @@
+services:
+  frontend:
+    build:
+      context: ../dev
+      dockerfile: Dockerfile
+    container_name: challenge48h-frontend
+    restart: unless-stopped
+    environment:
+      VITE_APP_NAME: AirMap
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    ports:
+      - "${FRONTEND_PORT}:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - public_net
+
+  backend:
+    build:
+      context: ../dev/backend
+      dockerfile: Dockerfile
+    container_name: challenge48h-backend
+    restart: unless-stopped
+    environment:
+      APP_NAME: challenge-48h-backend
+      APP_ENV: docker
+      APP_PORT: 8787
+      DB_HOST: postgres-primary
+      DB_PORT: 5432
+      DB_NAME: ${APP_DB_NAME}
+      DB_USER: ${APP_DB_USER}
+      DB_PASSWORD_FILE: /run/secrets/app_db_password
+      DATA_API_BASE_URL: http://data-api:8000
+      DATA_API_HISTORY_DAYS: ${DATA_API_HISTORY_DAYS}
+      DATA_API_REFRESH_ON_SYNC: ${DATA_API_REFRESH_ON_SYNC}
+      ENABLE_SYNC_WORKER: ${ENABLE_SYNC_WORKER}
+      SYNC_ON_STARTUP: ${SYNC_ON_STARTUP}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    ports:
+      - "${BACKEND_PORT}:8787"
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      data-api:
+        condition: service_healthy
+    secrets:
+      - app_db_password
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health').read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+    networks:
+      - public_net
+      - private_net
+
+  data-api:
+    build:
+      context: ../data
+      dockerfile: Dockerfile
+    container_name: challenge48h-data-api
+    restart: unless-stopped
+    environment:
+      APP_ENV: docker
+      DATAGOUV_POLLUTION_DAYS: ${DATAGOUV_POLLUTION_DAYS}
+      GEODAIR_BASE_URL: https://www.geodair.fr/api-ext
+    command:
+      - /bin/sh
+      - -c
+      - |
+        if [ -f /run/secrets/geodair_api_key ]; then
+          export GEODAIR_API_KEY="$(cat /run/secrets/geodair_api_key)"
+        fi
+        uvicorn app.main:app --host 0.0.0.0 --port 8000
+    secrets:
+      - geodair_api_key
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()\""]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+    networks:
+      - private_net
+
+  postgres-primary:
+    image: postgres:16-alpine
+    container_name: challenge48h-postgres-primary
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_super_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+      APP_DB_NAME: ${APP_DB_NAME}
+      APP_DB_USER: ${APP_DB_USER}
+      APP_DB_PASSWORD_FILE: /run/secrets/app_db_password
+      REPL_USER: ${REPL_USER}
+      REPL_PASSWORD_FILE: /run/secrets/repl_password
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+      - -c
+      - hot_standby=on
+    volumes:
+      - pg_primary_data:/var/lib/postgresql/data
+      - ./postgres/primary/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+    secrets:
+      - pg_super_password
+      - app_db_password
+      - repl_password
+    networks:
+      - private_net
+
+  postgres-replica:
+    image: postgres:16-alpine
+    container_name: challenge48h-postgres-replica
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_super_password
+      PGDATA: /var/lib/postgresql/data
+      PRIMARY_HOST: postgres-primary
+      PRIMARY_PORT: 5432
+      REPL_USER: ${REPL_USER}
+      REPL_PASSWORD_FILE: /run/secrets/repl_password
+    command: ["/bin/sh", "/usr/local/bin/setup-replica.sh"]
+    volumes:
+      - pg_replica_data:/var/lib/postgresql/data
+      - ./postgres/replica/setup-replica.sh:/usr/local/bin/setup-replica.sh:ro
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+    secrets:
+      - pg_super_password
+      - repl_password
+    networks:
+      - private_net
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: challenge48h-cadvisor
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    networks:
+      - public_net
+
+  prometheus:
+    image: prom/prometheus:v2.53.4
+    container_name: challenge48h-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT}:9090"
+    depends_on:
+      backend:
+        condition: service_healthy
+      cadvisor:
+        condition: service_started
+    networks:
+      - public_net
+
+  grafana:
+    image: grafana/grafana:11.1.4
+    container_name: challenge48h-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+    ports:
+      - "${GRAFANA_PORT}:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    secrets:
+      - grafana_admin_password
+    networks:
+      - public_net
+
+volumes:
+  pg_primary_data:
+  pg_replica_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  public_net:
+    driver: bridge
+  private_net:
+    driver: bridge
+
+secrets:
+  pg_super_password:
+    file: ./secrets/pg_super_password.txt
+  app_db_password:
+    file: ./secrets/app_db_password.txt
+  repl_password:
+    file: ./secrets/repl_password.txt
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt
+  geodair_api_key:
+    file: ./secrets/geodair_api_key.txt

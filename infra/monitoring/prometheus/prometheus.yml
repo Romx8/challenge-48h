@@ -1,0 +1,80 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["prometheus:9090"]
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  - job_name: backend
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["backend:8787"]
+
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ["http://hub-ui:8501"]
+        labels:
+          service: hub-ui
+      - targets: ["http://frontend:5173"]
+        labels:
+          service: frontend
+      - targets: ["http://backend:8787/health"]
+        labels:
+          service: backend
+      - targets: ["http://data-api:8000/health"]
+        labels:
+          service: data-api
+      - targets: ["http://prometheus:9090/-/healthy"]
+        labels:
+          service: prometheus
+      - targets: ["http://grafana:3000/api/health"]
+        labels:
+          service: grafana
+      - targets: ["http://cadvisor:8080/healthz"]
+        labels:
+          service: cadvisor
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [service]
+        target_label: service
+      - source_labels: [service]
+        target_label: instance
+      - source_labels: [__param_target]
+        target_label: target
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  - job_name: blackbox-tcp
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets: ["postgres:5432"]
+        labels:
+          service: postgres
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [service]
+        target_label: service
+      - source_labels: [service]
+        target_label: instance
+      - source_labels: [__param_target]
+        target_label: target
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  - job_name: docker-exporter
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["docker-exporter:9324"]

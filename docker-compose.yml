@@ -1,0 +1,234 @@
+services:
+  hub-ui:
+    build:
+      context: ./hub-ui
+      dockerfile: Dockerfile
+    container_name: hub-ui
+    restart: unless-stopped
+    ports:
+      - "${HUB_UI_PORT:-8501}:8501"
+    environment:
+      HUB_UI_URL: "http://localhost:${HUB_UI_PORT:-8501}"
+      FRONTEND_URL: "http://localhost:${FRONTEND_PORT:-5173}"
+      BACKEND_URL: "http://localhost:${BACKEND_PORT:-8787}"
+      DATA_API_URL: "http://localhost:${DATA_API_PORT:-8000}"
+      PROMETHEUS_URL: "http://localhost:${PROMETHEUS_PORT:-9090}"
+      PROMETHEUS_INTERNAL_URL: "http://prometheus:9090"
+      GRAFANA_URL: "http://localhost:${GRAFANA_PORT:-3000}"
+      CADVISOR_URL: "http://localhost:${CADVISOR_PORT:-8080}"
+      BLACKBOX_URL: "http://localhost:${BLACKBOX_PORT:-9115}"
+      DOCKER_EXPORTER_URL: "http://localhost:${DOCKER_EXPORTER_PORT:-9324}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      frontend:
+        condition: service_started
+      backend:
+        condition: service_healthy
+      data-api:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+      grafana:
+        condition: service_started
+    networks:
+      - web_net
+
+  frontend:
+    build:
+      context: ./dev
+      dockerfile: Dockerfile
+    container_name: frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    environment:
+      VITE_APP_NAME: ${VITE_APP_NAME:-AirMap}
+      VITE_API_BASE_URL: "http://localhost:${BACKEND_PORT:-8787}"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - web_net
+
+  backend:
+    build:
+      context: ./dev/backend
+      dockerfile: Dockerfile
+    container_name: backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8787}:8787"
+    environment:
+      APP_NAME: challenge-48h-backend
+      APP_ENV: docker
+      APP_PORT: 8787
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-air_map}
+      DB_USER: ${POSTGRES_USER:-air_map_app}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-air_map_password}
+      DATA_API_BASE_URL: http://data-api:8000
+      DATA_API_HISTORY_DAYS: ${DATA_API_HISTORY_DAYS:-10}
+      DATA_API_REFRESH_ON_SYNC: ${DATA_API_REFRESH_ON_SYNC:-true}
+      ENABLE_SYNC_WORKER: ${ENABLE_SYNC_WORKER:-true}
+      SYNC_ON_STARTUP: ${SYNC_ON_STARTUP:-true}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-300}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health').read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+    networks:
+      - web_net
+      - core_net
+
+  data-api:
+    build:
+      context: ./data
+      dockerfile: Dockerfile
+    container_name: data-api
+    restart: unless-stopped
+    ports:
+      - "${DATA_API_PORT:-8000}:8000"
+    environment:
+      APP_ENV: docker
+      DATAGOUV_POLLUTION_DAYS: ${DATAGOUV_POLLUTION_DAYS:-10}
+      GEODAIR_API_KEY: ${GEODAIR_API_KEY:-}
+      GEODAIR_BASE_URL: ${GEODAIR_BASE_URL:-https://www.geodair.fr/api-ext}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()\""]
+      interval: 20s
+      timeout: 10s
+      retries: 8
+    networks:
+      - web_net
+      - core_net
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    restart: unless-stopped
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-air_map}
+      POSTGRES_USER: ${POSTGRES_USER:-air_map_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-air_map_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-air_map_app} -d ${POSTGRES_DB:-air_map}"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+    networks:
+      - core_net
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    restart: unless-stopped
+    ports:
+      - "${CADVISOR_PORT:-8080}:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    networks:
+      - web_net
+      - core_net
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.25.0
+    container_name: blackbox
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/blackbox/blackbox.yml
+    volumes:
+      - ./infra/monitoring/blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    ports:
+      - "${BLACKBOX_PORT:-9115}:9115"
+    networks:
+      - web_net
+      - core_net
+
+  docker-exporter:
+    build:
+      context: ./infra/monitoring/docker-exporter
+      dockerfile: Dockerfile
+    container_name: docker-exporter
+    restart: unless-stopped
+    environment:
+      STACK_NAME: ${COMPOSE_PROJECT_NAME:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "${DOCKER_EXPORTER_PORT:-9324}:9324"
+    networks:
+      - web_net
+      - core_net
+
+  prometheus:
+    image: prom/prometheus:v2.53.4
+    container_name: prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./infra/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      backend:
+        condition: service_healthy
+      cadvisor:
+        condition: service_started
+      blackbox:
+        condition: service_started
+      docker-exporter:
+        condition: service_started
+    networks:
+      - web_net
+      - core_net
+
+  grafana:
+    image: grafana/grafana:11.1.4
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./infra/monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    networks:
+      - web_net
+      - core_net
+
+volumes:
+  postgres_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  web_net:
+    driver: bridge
+  core_net:
+    driver: bridge
