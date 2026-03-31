@@ -1,1 +1,19 @@
 .env
+
+# Nested project artifacts
+dev/node_modules/
+dev/dist/
+dev/.env
+dev/.env.local
+dev/.env.*.local
+dev/.DS_Store
+
+data/.env
+data/.venv/
+data/__pycache__/
+data/**/*.pyc
+data/data/processed/
+
+# Python cache (generic)
+__pycache__/
+*.pyc
